@@ -24,12 +24,14 @@
  * This class provides unified key event handler for Internet Explorer,
  * Firefox, Opera and Safari.
  *
+ * NOTE: Instances of this class must be disposed of after use
+ *
  * @require(qx.event.handler.UserAction)
  */
 qx.Class.define("qx.event.handler.Keyboard",
 {
   extend : qx.core.Object,
-  implement : qx.event.IEventHandler,
+  implement : [ qx.event.IEventHandler, qx.core.IDisposable ],
 
 
 
@@ -197,13 +199,14 @@ qx.Class.define("qx.event.handler.Keyboard",
 
       // IE and Safari suppress a "keypress" event if the "keydown" event's
       // default action was prevented. In this case we emulate the "keypress"
-      if (
-        qx.core.Environment.get("engine.name") == "mshtml" ||
-        qx.core.Environment.get("engine.name") == "webkit"
-      )
-      {
-        if (type == "keydown" && event.getDefaultPrevented())
-        {
+      //
+      // FireFox suppresses "keypress" when "keydown" default action is prevented.
+      // from version 29: https://bugzilla.mozilla.org/show_bug.cgi?id=935876.
+      if (event.getDefaultPrevented() && type == "keydown") {
+        if (qx.core.Environment.get("engine.name") == "mshtml" ||
+            qx.core.Environment.get("engine.name") == "webkit" ||
+            (qx.core.Environment.get("engine.name") == "gecko" && qx.core.Environment.get("browser.version") >= 29)) {
+
           // some key press events are already emulated. Ignore these events.
           if (!qx.event.util.Keyboard.isNonPrintableKeyCode(keyCode) && !this._emulateKeyPress[keyCode]) {
             this._fireSequenceEvent(domEvent, "keypress", keyIdentifier);
@@ -309,62 +312,7 @@ qx.Class.define("qx.event.handler.Keyboard",
      */
     __onKeyUpDown : qx.event.GlobalError.observeMethod(qx.core.Environment.select("engine.name",
     {
-      "mshtml" : function(domEvent)
-      {
-        domEvent = window.event || domEvent;
-
-        var keyCode = domEvent.keyCode;
-        var charCode = 0;
-        var type = domEvent.type;
-
-        // Ignore the down in such sequences dp dp dp
-        if (!(this.__lastUpDownType[keyCode] == "keydown" && type == "keydown")) {
-          this._idealKeyHandler(keyCode, charCode, type, domEvent);
-        }
-
-        // On non print-able character be sure to add a keypress event
-        if (type == "keydown")
-        {
-          // non-printable, backspace or tab
-          if (qx.event.util.Keyboard.isNonPrintableKeyCode(keyCode) || this._emulateKeyPress[keyCode]) {
-            this._idealKeyHandler(keyCode, charCode, "keypress", domEvent);
-          }
-        }
-
-        // Store last type
-        this.__lastUpDownType[keyCode] = type;
-      },
-
-      "gecko" : function(domEvent)
-      {
-        var charCode = 0;
-        var keyCode = domEvent.keyCode;
-        var type = domEvent.type;
-        var kbUtil = qx.event.util.Keyboard;
-
-        // FF repeats under windows keydown events like IE
-        if (qx.core.Environment.get("os.name") == "win")
-        {
-          var keyIdentifier = keyCode ? kbUtil.keyCodeToIdentifier(keyCode) : kbUtil.charCodeToIdentifier(charCode);
-
-          if (!(this.__lastUpDownType[keyIdentifier] == "keydown" && type == "keydown")) {
-            this._idealKeyHandler(keyCode, charCode, type, domEvent);
-          }
-
-          // Store last type
-          this.__lastUpDownType[keyIdentifier] = type;
-        }
-
-        // all other OSes
-        else
-        {
-          this._idealKeyHandler(keyCode, charCode, type, domEvent);
-        }
-
-        this.__firefoxInputFix(domEvent.target, type, keyCode);
-      },
-
-      "webkit" : function(domEvent)
+      "gecko|webkit|mshtml" : function(domEvent)
       {
         var keyCode = 0;
         var charCode = 0;
@@ -377,9 +325,17 @@ qx.Class.define("qx.event.handler.Keyboard",
         // On non print-able character be sure to add a keypress event
         if (type == "keydown")
         {
-          // non-printable, backspace or tab
-          if (qx.event.util.Keyboard.isNonPrintableKeyCode(keyCode) || this._emulateKeyPress[keyCode]) {
-            this._idealKeyHandler(keyCode, charCode, "keypress", domEvent);
+          /*
+           * We need an artificial keypress event for every keydown event.
+           * Newer browsers do not fire keypress for a regular charachter key (e.g when typing 'a')
+           * if it was typed with the CTRL, ALT or META Key pressed during typing, like
+           * doing it when typing the combination CTRL+A
+           */
+          var isModifierDown = domEvent.ctrlKey || domEvent.altKey || domEvent.metaKey;
+
+          // non-printable, backspace, tab or the modfier keys are down
+          if (qx.event.util.Keyboard.isNonPrintableKeyCode(keyCode) || this._emulateKeyPress[keyCode] || isModifierDown) {
+            return self._idealKeyHandler(keyCode, charCode, "keypress", domEvent);
           }
         }
 
@@ -465,10 +421,18 @@ qx.Class.define("qx.event.handler.Keyboard",
 
       "gecko" : function(domEvent)
       {
-        var charCode = domEvent.charCode;
-        var type = domEvent.type;
+        if(qx.core.Environment.get("engine.version") < 66) {
+          var charCode = domEvent.charCode;
+          var type = domEvent.type;
 
-        this._idealKeyHandler(domEvent.keyCode, charCode, type, domEvent);
+          this._idealKeyHandler(domEvent.keyCode, charCode, type, domEvent);
+        } else {
+          if (this._charCode2KeyCode[domEvent.keyCode]) {
+            this._idealKeyHandler(this._charCode2KeyCode[domEvent.keyCode], 0, domEvent.type, domEvent);
+          } else {
+            this._idealKeyHandler(0, domEvent.keyCode, domEvent.type, domEvent);
+          }
+        }
       },
 
       "webkit" : function(domEvent)
@@ -577,6 +541,16 @@ qx.Class.define("qx.event.handler.Keyboard",
         27: true
       },
 
+      "gecko" : (qx.core.Environment.get("browser.version") >= 65) ?
+      {
+        8: true,
+        9: true,
+        27: true
+      }
+      :
+      {
+      },
+
       "default" : {}
     }),
 
@@ -633,8 +607,7 @@ qx.Class.define("qx.event.handler.Keyboard",
     // register at the event handler
     qx.event.Registration.addHandler(statics);
 
-    if ((qx.core.Environment.get("engine.name") == "mshtml") ||
-      qx.core.Environment.get("engine.name") == "webkit")
+    if ((qx.core.Environment.get("engine.name") !== "opera"))
     {
       members._charCode2KeyCode =
       {
